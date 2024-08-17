@@ -1,36 +1,24 @@
 using System.Text.Json;
 using Amazon.Lambda.Core;
 using Amazon.Lambda.S3Events;
-using Amazon.S3;
 using Amazon.S3.Model;
-using Amazon.S3.Util;
-
-// Assembly attribute to enable the Lambda function's JSON input to be converted into a .NET class.
-[assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+using LambdaFunction.Storage;
 
 namespace LambdaFunction;
 
 public class Function
 {
-    IAmazonS3 S3Client { get; set; }
+    private readonly IBucketStorage bucketStorage;
+    private readonly string inputPath = "inputs";
+    private readonly string outputPath = "outputs";
 
-    /// <summary>
-    /// Default constructor. This constructor is used by Lambda to construct the instance. When invoked in a Lambda environment
-    /// the AWS credentials will come from the IAM role associated with the function and the AWS region will be set to the
-    /// region the Lambda function is executed in.
+    // <summary>
+    /// Constructs an instance with a preconfigured Bucket Storage. This can be used for testing outside of the Lambda environment.
     /// </summary>
-    public Function()
+    /// <param name="bucketStorage">The bucket storage manager</param>
+    public Function(IBucketStorage bucketStorage)
     {
-        S3Client = new AmazonS3Client();
-    }
-
-    /// <summary>
-    /// Constructs an instance with a preconfigured S3 client. This can be used for testing outside of the Lambda environment.
-    /// </summary>
-    /// <param name="s3Client">The service client to access Amazon S3.</param>
-    public Function(IAmazonS3 s3Client)
-    {
-        this.S3Client = s3Client;
+        this.bucketStorage = bucketStorage;
     }
 
     /// <summary>
@@ -43,65 +31,79 @@ public class Function
     public async Task FunctionHandler(S3Event evnt, ILambdaContext context)
     {
         var eventRecords = evnt.Records ?? new List<S3Event.S3EventNotificationRecord>();
-        foreach (var record in eventRecords)
+
+        context.Logger.LogInformation($"Start to proccesing CSV files");
+        await foreach (var jsonResult in TransformCsvToJson(eventRecords))
         {
-            var s3Event = record.S3;
-            if (s3Event == null)
+            var csvKey  = jsonResult["csvKey"];
+            var jsonTempFile  = jsonResult["jsonTempFile"];
+            var bucket  = jsonResult["bucket"];
+
+            if ( jsonResult.ContainsKey("error") )
             {
+                var errorMessage  = jsonResult["error"];
+                context.Logger.LogError($"CSV {csvKey} with error {errorMessage}");
                 continue;
             }
+            context.Logger.LogInformation($"Json generated: {jsonTempFile}");
+
+            var jsonKey = csvKey.Replace(".csv", ".json").Replace(inputPath, outputPath);
 
             try
             {
-                context.Logger.LogInformation(s3Event.Object.Key);
-                
-                var bucket = record.S3.Bucket.Name;
-                var csvKey = record.S3.Object.Key;
-                var jsonKey = csvKey.Replace(".csv", ".json");
+                await bucketStorage.PutObjectAsync(bucket, jsonKey, jsonTempFile);
+                context.Logger.LogInformation($"Json uploaded: {jsonKey}");
+            }
+            catch (Exception ex)
+            {
+                context.Logger.LogError($"Uploading file {jsonKey} with error: {ex.Message}");
+            }
+            finally
+            {
+                File.Delete(jsonTempFile);
+                context.Logger.LogInformation($"Temp file deleted: {jsonTempFile}");
+            }
+        }
+        context.Logger.LogInformation($"End to proccesing CSV files");
+    }
 
-                var jsonTempFile = "/tmp/output.json";
+    private async IAsyncEnumerable<Dictionary<string, string>> TransformCsvToJson(List<S3Event.S3EventNotificationRecord> records)
+    {
+        foreach (var record in records)
+        {
+            if (!record.S3.Object.Key.EndsWith(".csv"))
+                continue;
 
+            Guid uuid = Guid.NewGuid();
+            var bucket  = record.S3.Bucket.Name;
+            var csvKey  = record.S3.Object.Key;
+            var jsonKey = csvKey.Replace(".csv", ".json").Replace(inputPath, outputPath);
+            var jsonTempFile = $"/tmp/{uuid}.json";
+
+            var item = new Dictionary<string, string>(){
+                { "bucket", bucket },
+                { "csvKey", csvKey },
+                { "jsonTempFile", jsonTempFile },
+            };
+
+            try
+            {
                 using (var fileStream = new FileStream(jsonTempFile, FileMode.Create, FileAccess.Write))
                 using (var writer = new StreamWriter(fileStream))
                 {
-                    await writer.WriteAsync("[");
-                    var firstLine = true;
-
                     await foreach (var jsonObject in ReadCsvStreaming(bucket, csvKey))
                     {
-                        if (!firstLine)
-                        {
-                            await writer.WriteAsync(",");
-                        }
-                        else
-                        {
-                            firstLine = false;
-                        }
-
                         var jsonLine = JsonSerializer.Serialize(jsonObject);
-                        await writer.WriteAsync(jsonLine);
+                        await writer.WriteLineAsync(jsonLine);
                     }
-
-                    await writer.WriteAsync("]");
-                }
-
-                await S3Client.PutObjectAsync(new PutObjectRequest
-                {
-                    BucketName = bucket,
-                    Key = jsonKey,
-                    FilePath = jsonTempFile
-                });
-
-                File.Delete(jsonTempFile);
-
+                }                
             }
-            catch (Exception e)
+            catch (System.Exception ex)
             {
-                context.Logger.LogError($"Error getting object {s3Event.Object.Key} from bucket {s3Event.Bucket.Name}. Make sure they exist and your bucket is in the same region as this function.");
-                context.Logger.LogError(e.Message);
-                context.Logger.LogError(e.StackTrace);
-                throw;
+                item["error"] = ex.Message;
             }
+
+            yield return item;
         }
     }
 
@@ -113,8 +115,7 @@ public class Function
             Key = key
         };
 
-        using (var response = await S3Client.GetObjectAsync(request))
-        using (var stream = response.ResponseStream)
+        using (var stream = await bucketStorage.GetObjectStreamAsync(bucket, key))
         using (var reader = new StreamReader(stream))
         {
             var headerLine = await reader.ReadLineAsync();
@@ -123,7 +124,7 @@ public class Function
             while (!reader.EndOfStream)
             {
                 var line = await reader.ReadLineAsync();
-                
+
                 if (String.IsNullOrEmpty(line))
                     continue;
 
