@@ -18,35 +18,28 @@ public class Startup
         var awsAccessKey = Environment.GetEnvironmentVariable("AWS_ACCESS_KEY") ?? "";
         var awsSecretKey = Environment.GetEnvironmentVariable("AWS_SECRET_KEY") ?? "";
 
-
-        // Adding Services
-        services.AddSingleton<IBucketStorage, S3BucketStorage>();
-        services.AddAWSService<IAmazonS3>();
-
         var useCredentials = awsAccessKey != string.Empty
                              && awsSecretKey != string.Empty
                              && awsServiceUrl != string.Empty;
 
-        // if (useCredentials)
-        // {
-        //     var awsOptions = new AWSOptions
-        //     {
-        //         DefaultClientConfig =
-        //         {
-        //             ServiceURL = awsServiceUrl,
-        //             AuthenticationRegion = "us-east-1"
-        //         },
-        //         Credentials = new BasicAWSCredentials(awsAccessKey, awsSecretKey)
-        //     };
-        //     services.AddAWSService<IAmazonS3>(awsOptions);
-        // }
-        // else
-        // {
-        //     services.AddAWSService<IAmazonS3>();
-        // }
-
-        // services.AddScoped<IProcessorFile, ProcessorFile>();
-
-        // services.AddLogging(loggingBuilder => { LambdaLogger.SetupLogger(loggingBuilder); });
+        if (useCredentials)
+        {
+            var awsOptions = new AWSOptions
+            {
+                DefaultClientConfig =
+                {
+                    ServiceURL = awsServiceUrl,
+                    AuthenticationRegion = "us-east-1"
+                },
+                Credentials = new BasicAWSCredentials(awsAccessKey, awsSecretKey)
+            };
+            services.AddAWSService<IAmazonS3>(awsOptions);
+            services.AddSingleton<IBucketStorage, FileSystemStorage>();
+        }
+        else
+        {
+            services.AddAWSService<IAmazonS3>();
+            services.AddSingleton<IBucketStorage, S3BucketStorage>();            
+        }
     }
 }

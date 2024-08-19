@@ -3,6 +3,7 @@ using Amazon.Lambda.Core;
 using Amazon.Lambda.S3Events;
 using Amazon.S3.Model;
 using LambdaFunction.Storage;
+using Datadog.Trace.Annotations;
 
 namespace LambdaFunction;
 
@@ -28,6 +29,7 @@ public class Function
     /// <param name="evnt">The event for the Lambda function handler to process.</param>
     /// <param name="context">The ILambdaContext that provides methods for logging and describing the Lambda environment.</param>
     /// <returns></returns>
+    [Trace(OperationName = "TransformFunction.FunctionHandler", ResourceName = "TransformFunction")] 
     public async Task FunctionHandler(S3Event evnt, ILambdaContext context)
     {
         var eventRecords = evnt.Records ?? new List<S3Event.S3EventNotificationRecord>();
